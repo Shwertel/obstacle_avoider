@@ -1,7 +1,7 @@
-# obstacle_avoider — Autonomous Obstacle Avoidance (ROS 2 Humble)
+# obstacle_avoider — Autonomous Obstacle Avoidance & Goal Navigation (ROS 2 Humble)
 
-A ROS 2 package that drives a simulated TurtleBot3 through an environment while
-detecting and avoiding obstacles in real time, using LiDAR data.
+A ROS 2 package that drives a simulated TurtleBot3 from its current position to a
+goal point, while detecting and avoiding obstacles along the way using LiDAR.
 
 Built as part of the Egrobots ROS 2 Week Task (Autonomous Obstacle Avoidance).
 
@@ -9,12 +9,20 @@ Built as part of the Egrobots ROS 2 Week Task (Autonomous Obstacle Avoidance).
 
 ## 1. Overview
 
-The robot continuously reads its LiDAR scan (`/scan`) and checks a forward-facing
-cone for obstacles. If something is closer than a configurable safe distance, the
-robot stops moving forward and turns in place until the path is clear again.
-Otherwise, it drives forward. The behavior can be started and stopped on demand
-via ROS 2 services, and all key thresholds are exposed as runtime-tunable
-parameters rather than hardcoded values.
+The robot continuously reads its LiDAR scan (`/scan`) and its odometry (`/odom`).
+On each scan cycle it applies two behaviors in priority order:
+
+1. **Obstacle avoidance (highest priority).** If an obstacle enters a forward-facing
+   detection cone within `safe_distance`, the robot commits to turning in place
+   toward the side with more open space, and keeps turning until the path is
+   clearly clear (past `clear_distance`) — not just barely clear — before resuming.
+2. **Goal navigation.** When no obstacle is blocking the path, the robot steers
+   toward a target position (`goal_x`, `goal_y`) using proportional heading
+   control, slowing its forward speed while turning sharply and speeding up once
+   roughly facing the goal. It stops once within `goal_tolerance` of the goal.
+
+The behavior can be started and stopped on demand via ROS 2 services, and every
+tunable threshold is exposed as a ROS 2 parameter rather than hardcoded.
 
 ---
 
@@ -22,11 +30,12 @@ parameters rather than hardcoded values.
 
 | File | Purpose |
 |---|---|
-| `obstacle_avoider/obstacle_avoider_node.py` | Main node: subscribes to `/scan`, publishes to `/cmd_vel`, implements avoidance logic, parameters, and start/stop services |
-| `obstacle_avoider/manual_controller.py` | Optional keyboard teleop node for manually driving the robot (testing/demo aid) |
+| `obstacle_avoider/obstacle_avoider_node.py` | Main node: avoidance + goal navigation, parameters, start/stop services |
+| `obstacle_avoider/manual_controller.py` | Keyboard teleop node for manually driving the robot (testing/demo aid) |
 | `obstacle_avoider/scan_subscriber.py` | Early learning-step node: LiDAR subscriber only (not part of the final behavior) |
 | `obstacle_avoider/velocity_publisher.py` | Early learning-step node: constant-forward publisher only (not part of the final behavior) |
-| `launch/obstacle_avoidance.launch.py` | Launch file that starts Gazebo + the obstacle avoider node together |
+| `config/obstacle_avoider_params.yaml` | All tunable parameters for `obstacle_avoider_node`, in one place |
+| `launch/obstacle_avoidance.launch.py` | Launch file that starts Gazebo (TurtleBot3) + the obstacle avoider node, loading parameters from the YAML file |
 
 `scan_subscriber` and `velocity_publisher` were built first, separately, to
 understand ROS 2 pub/sub before combining both into `obstacle_avoider_node`. They
@@ -42,7 +51,6 @@ the final application.
 sudo apt update
 sudo apt install ros-humble-desktop ros-dev-tools python3-colcon-common-extensions
 sudo apt install ros-humble-turtlebot3 ros-humble-turtlebot3-simulations ros-humble-gazebo-ros-pkgs
-sudo apt install ros-humble-turtlebot3-teleop   # optional, only if using built-in teleop instead of manual_controller
 ```
 
 Set the TurtleBot3 model (once, persists via `.bashrc`):
@@ -69,22 +77,29 @@ ros2 launch obstacle_avoider obstacle_avoidance.launch.py
 ```
 
 This launches Gazebo (empty world, TurtleBot3 spawned) and starts
-`obstacle_avoider_node`. The node starts **disabled** by design (see Section 5),
-so avoidance must be explicitly started:
+`obstacle_avoider_node` with all parameters loaded from
+`config/obstacle_avoider_params.yaml`. The node starts **disabled** by design,
+so behavior must be explicitly started:
 
 ```bash
 ros2 service call /start_avoidance std_srvs/srv/Trigger
 ```
 
-To stop the behavior at any time (robot halts immediately):
+To stop at any time (robot halts immediately):
 ```bash
 ros2 service call /stop_avoidance std_srvs/srv/Trigger
 ```
 
-### Overriding parameters at launch
+### Setting a goal / tuning parameters
+Edit `config/obstacle_avoider_params.yaml` before launching, or change values
+live while the node is running:
 ```bash
-ros2 launch obstacle_avoider obstacle_avoidance.launch.py safe_distance:=1.0 linear_speed:=0.15
+ros2 param set /obstacle_avoider_node goal_x 1.5
+ros2 param set /obstacle_avoider_node goal_y -1.0
+ros2 param set /obstacle_avoider_node linear_speed 0.3
 ```
+(Note: changing `goal_x`/`goal_y` after the goal was already reached requires a
+`/stop_avoidance` then `/start_avoidance` to reset the reached-goal flag.)
 
 ### Manual driving (optional, for testing)
 ```bash
@@ -104,6 +119,7 @@ both publish to `/cmd_vel` and will conflict.
 | Topic | Type | Purpose |
 |---|---|---|
 | `/scan` | `sensor_msgs/msg/LaserScan` | LiDAR distance readings, used to detect obstacles ahead |
+| `/odom` | `nav_msgs/msg/Odometry` | Robot's current position and orientation, used for goal navigation |
 
 **Publishes to:**
 | Topic | Type | Purpose |
@@ -113,16 +129,22 @@ both publish to `/cmd_vel` and will conflict.
 **Provides services:**
 | Service | Type | Purpose |
 |---|---|---|
-| `/start_avoidance` | `std_srvs/srv/Trigger` | Enables the avoidance behavior |
-| `/stop_avoidance` | `std_srvs/srv/Trigger` | Disables the behavior and immediately publishes a zero `Twist` so the robot doesn't coast |
+| `/start_avoidance` | `std_srvs/srv/Trigger` | Enables avoidance + navigation behavior |
+| `/stop_avoidance` | `std_srvs/srv/Trigger` | Disables the behavior and immediately publishes a zero `Twist` |
 
-**Parameters:**
+**Parameters** (all in `config/obstacle_avoider_params.yaml`):
+
 | Parameter | Default | Meaning |
 |---|---|---|
-| `safe_distance` | `0.5` (m) | Distance below which an obstacle is considered too close |
-| `linear_speed` | `0.2` (m/s) | Forward speed used while the path is clear |
-| `angular_speed` | `0.5` (rad/s) | Turning speed used while avoiding an obstacle |
-| `cone_angle_deg` | `30.0` (deg) | Half-angle of the forward-facing detection cone |
+| `safe_distance` | `0.5` (m) | Distance below which an obstacle triggers avoidance |
+| `clear_distance` | `0.7` (m) | Distance the path must exceed before avoidance ends and navigation resumes (kept higher than `safe_distance` to prevent rapid switching) |
+| `linear_speed` | `0.2` (m/s) | Base forward speed while navigating toward the goal |
+| `angular_speed` | `0.5` (rad/s) | Turning speed used while avoiding an obstacle, and the max turn rate while navigating |
+| `cone_angle_deg` | `30.0` (deg) | Half-angle of the forward-facing obstacle detection cone |
+| `goal_x` | `2.0` (m) | Target X position, in the `odom` frame |
+| `goal_y` | `0.0` (m) | Target Y position, in the `odom` frame |
+| `goal_tolerance` | `0.15` (m) | Distance within which the goal is considered reached |
+| `heading_kp` | `1.5` | Proportional gain for turning to face the goal |
 
 Parameters can be read/changed live while the node is running:
 ```bash
@@ -139,53 +161,64 @@ manual testing/demo purposes.
 
 ## 5. Design Decisions
 
-**Reactive avoidance over a planned path.** The robot doesn't build a map or plan
-a route — it reacts to the closest obstacle in its immediate forward view each
-scan cycle. This was chosen because it satisfies the task's core requirement
-(real-time detection + avoidance) with a design that's easy to reason about,
-test, and explain, and it maps directly onto sensor data without extra
-dependencies like SLAM/Nav2.
+**Avoidance always overrides navigation.** Every scan cycle checks for a nearby
+obstacle first; goal-seeking logic only runs once the robot is not currently
+avoiding something. This guarantees the robot never drives through an obstacle
+just because the goal happens to be on the other side of it.
 
-**Forward-facing cone, not the full 360° scan.** An early version used
-`min()` over the entire LiDAR scan, which caused the robot to react to objects
-beside or behind it — objects nowhere near its actual path. Restricting the
-check to a ±30° cone in front (`cone_angle_deg` parameter) fixed this and made
-the behavior match visible driving intent.
+**Committed turn direction, chosen once per avoidance episode.** When avoidance
+starts, the robot compares the closest distance on its left vs. right within the
+detection cone and locks in a turn direction toward the side with more open
+space — it does not re-evaluate direction every cycle. An earlier version picked
+direction fresh every scan, which caused visible left-right jitter as the
+closest-obstacle angle flickered slightly frame to frame.
 
-**Turn-in-place recovery.** When blocked, the robot sets `linear.x = 0` and
-turns via `angular.z` until the cone clears. This is simple, predictable, and
-sufficient for a single-obstacle empty-world environment; it does not attempt
-to pick the "best" direction to turn (always turns the same way), which is a
-known simplification worth extending later (e.g., turning toward the side with
-more clearance).
+**Hysteresis between `safe_distance` and `clear_distance`.** Avoidance mode does
+not end the instant the obstacle edge leaves the detection cone — it requires
+distance to exceed a separate, larger `clear_distance` threshold. Without this,
+the robot would flip back to forward motion prematurely (mid-turn, obstacle
+still effectively in the way) and immediately re-trigger avoidance, causing
+repeated near-collisions before the two thresholds were separated.
+
+**Forward-facing cone, not the full 360° scan.** Restricting obstacle checks to
+a `cone_angle_deg` cone in front of the robot (rather than the closest point in
+the entire scan) avoids reacting to objects beside or behind the robot that are
+not actually in its path.
+
+**Proportional heading control for goal navigation.** Turn rate scales with how
+far off the robot's heading is from the goal direction (`heading_kp *
+heading_error`), rather than a fixed turn speed — this gives a smoother approach
+than snapping between fixed left/right turns. Forward speed is additionally
+scaled by `cos(heading_error)`, so the robot turns in place first when badly
+misaligned, then accelerates once roughly facing the goal, instead of driving a
+wide, wasteful arc.
 
 **Start/stop as a service, not a topic.** `/start_avoidance` and
 `/stop_avoidance` are one-shot, on/off commands with no ongoing data to stream —
-a service (request → response) fits that better than a topic, which is meant for
-continuous data. `std_srvs/srv/Trigger` was used specifically because it needs
-no input arguments and returns a simple success/message pair, matching the
-"just do this" nature of the command.
+`std_srvs/srv/Trigger` fits that better than a topic (meant for continuous data)
+and needs no input arguments, matching the "just do this" nature of the command.
 
-**Parameters over hardcoded constants.** `safe_distance`, `linear_speed`,
-`angular_speed`, and `cone_angle_deg` are all ROS 2 parameters so they can be
-tuned without recompiling — either at launch time (`ros2 launch ... param:=value`)
-or live at runtime (`ros2 param set`), which was verified during testing.
-
-**Launch file reuses TurtleBot3's own Gazebo launch file** via
-`IncludeLaunchDescription` rather than duplicating its setup, keeping the launch
-file focused on what this package actually adds (the avoider node and its
-parameters).
+**Parameters over hardcoded constants, centralized in a YAML file.** All nine
+tunables live in `config/obstacle_avoider_params.yaml` rather than scattered
+through launch-file Python or hardcoded in the node. This keeps configuration as
+data, separate from launch logic, and scales cleanly as more parameters get
+added — editing a YAML line is simpler and less error-prone than editing a
+Python dict inside a launch file.
 
 ---
 
 ## 6. Known Limitations / Possible Extensions
 
-- Always turns the same direction when avoiding — doesn't check which side has
-  more clearance.
+- Avoidance always turns toward whichever side currently has more clearance at
+  the moment it triggers — it doesn't plan ahead or re-check mid-turn.
 - No recovery for being fully boxed in (e.g., a dead end); would spin in place
   indefinitely.
-- Tested in an empty Gazebo world with single obstacles; not evaluated in
-  cluttered or dynamic (moving-obstacle) environments.
+- Goal navigation assumes a static goal in the `odom` frame; the robot doesn't
+  replan a path around an obstacle toward the goal — it only turns away and
+  resumes heading toward the same goal once clear, which can occasionally take
+  a longer route than a full path planner would.
+- Tested in an empty Gazebo world with single, static obstacles; not evaluated
+  in cluttered or dynamic (moving-obstacle) environments.
 - Manual keyboard control processes one key at a time, so simultaneous combined
   movement (e.g., forward + turn) isn't possible without adding explicit combo
   keys — a limitation of single-key polling, not of the robot's `Twist` command
