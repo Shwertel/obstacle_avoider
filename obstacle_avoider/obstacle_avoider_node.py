@@ -85,14 +85,22 @@ class ObstacleAvoider(Node):
         if num_readings == 0:
             return
 
-        cone_size = int((cone_angle_deg / 360.0) * num_readings)
-        left_ranges = [r for r in msg.ranges[:cone_size] if r > 0.0]
-        right_ranges = [r for r in msg.ranges[-cone_size:] if r > 0.0]
+        cone_angle_rad = math.radians(cone_angle_deg)
+        center_index = int((0.0 - msg.angle_min) / msg.angle_increment)
+        cone_size = int(cone_angle_rad / msg.angle_increment)
+
+        left_ranges = [
+            r for r in msg.ranges[center_index:center_index + cone_size]
+            if r > 0.0
+        ]
+        right_ranges = [
+            r for r in msg.ranges[max(0, center_index - cone_size):center_index]
+            if r > 0.0
+        ]
         all_valid = left_ranges + right_ranges
         closest = min(all_valid) if all_valid else float('inf')
 
         cmd = Twist()
-
         # --- Priority 1: obstacle avoidance ---
         if not self.avoiding and closest < safe_distance:
             self.avoiding = True

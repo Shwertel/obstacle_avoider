@@ -9,8 +9,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     # Path to this package's own share directory (where installed config/launch files live)
     pkg_share = get_package_share_directory('obstacle_avoider')
-    params_file = os.path.join(pkg_share, 'config', 'obstacle_avoider_params.yaml')
-
+    params_file = os.path.join(pkg_share, 'config', 'task1_turtlebot_params.yaml')
     # Include TurtleBot3's Gazebo simulation launch file
     turtlebot3_gazebo_dir = get_package_share_directory('turtlebot3_gazebo')
     gazebo_launch = IncludeLaunchDescription(
